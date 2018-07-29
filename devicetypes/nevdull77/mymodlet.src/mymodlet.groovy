@@ -19,12 +19,12 @@ import groovy.transform.Field
  
 metadata {
     definition (name: "MyModlet", namespace: "nevdull77", author: "Patrik Karlsson") {
-        capability "Actuator"
         capability "Temperature Measurement"
         capability "Thermostat"
         capability "Configuration"
         capability "Refresh"
         capability "Sensor"
+        capability "Switch"
     }
 
     preferences {
@@ -55,7 +55,7 @@ metadata {
             state "off", label:'${name}', action:"thermostat.setThermostatMode"
             state "cool", label:'${name}', action:"thermostat.setThermostatMode"
         }
-        controlTile("coolSliderControl", "device.coolingSetpoint", "slider", height: 1, width: 2, inactiveLabel: false) {
+        controlTile("coolSliderControl", "device.coolingSetpoint", "slider", height: 1, width: 2, range:"(50..86)", inactiveLabel: false) {
             state "setCoolingSetpoint", action:"thermostat.setCoolingSetpoint", backgroundColor: "#00a0dc"
         }
         valueTile("coolingSetpoint", "device.coolingSetpoint", inactiveLabel: false, decoration: "flat") {
@@ -83,9 +83,8 @@ def parseBrokenJson(brokenJson) {
 }
 
 def parseDeviceData(String data) {
-    log.debug "parseDeviceData - BEGIN"
     def result = parseBrokenJson(data)
-
+    
     result.SmartACs.each {
         if ( it?.modlet?.modletName == modletName ) {
             def temperature = it?.thermostat?.currentTemperature
@@ -231,6 +230,10 @@ def off() {
     sendSwitch("off")
 }
 
+def on() {
+	cool()
+}
+
 def heat() {
     log.debug "heat is not supported by this thermostat"
 }
@@ -256,9 +259,11 @@ def updated() {
 }
 
 def refresh() {
-    log.debug "refresh() - BEGIN"
+	if ( state.changepending ) {
+    	log.debug "Change pending, skipping refresh ..."
+        return
+    }
     updateDeviceData()
-    log.debug "refresh() - END"
 }
 
 def modes() {
@@ -282,12 +287,18 @@ def setThermostatMode(String mode) {
 
 
 def reqNewCoolingSetpoint(data) {
-    def degreesInteger = data.degrees
+    def degrees = data.degrees
     def mode = device.currentState("thermostatMode")?.value
-	def isThermostated = mode == "cool" ? true : false
-    def body = "{\"data\":\"{\\\"DeviceId\\\": \\\"${state.deviceId}\\\", \\\"TargetTemperature\\\": \\\"${degreesInteger}\\\", \\\"IsThermostated\\\":${isThermostated}}\"}"
+    def currTemp = device.currentState("temperature")?.integerValue
+   
+    def isThermostated = mode == "cool" ? true : false
+    log.debug "Current mode: ${mode}, Current temp: ${currTemp}, Target temp: ${degrees}"
+    
+    def body = "{\"data\":\"{\\\"DeviceId\\\": \\\"${state.deviceId}\\\", \\\"TargetTemperature\\\": \\\"${degrees}\\\", \\\"IsThermostated\\\":${isThermostated}}\"}"
     def result = myModletRequest("POST", "/Devices/UserSettingsUpdate", body)
-    log.debug "setCoolingSetpoint result: ${result.json.data}"   
+    log.debug "setCoolingSetpoint result: ${result.json.data}"
+    state.changepending = false
+    runIn(2, refresh)
 }
 
 
@@ -295,12 +306,14 @@ def setCoolingSetpoint(degrees) {
     log.debug "Executing 'setCoolingSetpoint'"
     if (degrees != null) {
         def temperatureScale = getTemperatureScale()
-        def degreesInteger = degrees.toInteger()
+        degrees = degrees.toInteger()
         log.debug "setCoolingSetpoint({$degreesInteger} ${temperatureScale})"
-        sendEvent("name": "coolingSetpoint", "value": degreesInteger, "unit": temperatureScale)
+        state.changepending = true
+        sendEvent("name": "coolingSetpoint", "value": degrees, "unit": temperatureScale)
         unschedule(reqNewCoolingSetpoint)
-        // delay change 2 seconds, to give time for another quick adjustment if the slider is used
+
+		// delay change 2 seconds, to give time for another quick adjustment if the slider is used
         // the API seems to struggle with registering the change if it's to close to the last
-        runIn(2, reqNewCoolingSetpoint, [data: [degrees: degreesInteger]])
+        runIn(2, reqNewCoolingSetpoint, [data: [degrees: degrees]])
     }
 }
